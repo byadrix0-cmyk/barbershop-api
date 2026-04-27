@@ -1,6 +1,5 @@
 fastapi==0.115.0
 uvicorn==0.30.1
-gspread==6.1.2
 google-auth==2.29.0
-pydantic==2.13.3
-pydantic-core==2.46.3
+google-api-python-client==2.128.0
+pydantic==2.9.2
