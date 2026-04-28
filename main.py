@@ -88,6 +88,15 @@ def check_availability(req: CheckAvailabilityRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- DICCIONARIO DE TRADUCCIÓN ---
+# Traduce los servicios del español al inglés para el calendario
+TRANSLATIONS = {
+    "corte": "Haircut",
+    "barba": "Beard Trim",
+    "tinte": "Hair Color",
+    "tratamiento": "Hair Treatment"
+}
+
 @app.post("/book_appointment")
 def book_appointment(req: BookAppointmentRequest):
     try:
@@ -95,16 +104,43 @@ def book_appointment(req: BookAppointmentRequest):
         service = get_calendar_service()
         cal_id = get_calendar_id()
         
-        # Guardamos el nombre del barbero en el título para que la API pueda leerlo en el futuro
-        titulo_evento = f"{req.name} - {req.service}"
+        # 1. Traducción del servicio
+        servicio_ingles = TRANSLATIONS.get(req.service.lower(), req.service.capitalize())
+        
+        # 2. Configuración de Barbero y Colores
+        # Colores en Google Calendar: 9 = Azul (Blueberry), 10 = Verde (Basil), 8 = Gris (Default)
+        color_evento = "8" 
+        nombre_barbero = "Sin preferencia"
+        
         if req.barber and req.barber.lower() != "sin preferencia":
-            titulo_evento += f" (con {req.barber})"
+            nombre_barbero = req.barber.capitalize()
+            if "kevin" in req.barber.lower():
+                color_evento = "9"  # Azul para Kevin
+            elif "dani" in req.barber.lower():
+                color_evento = "10" # Verde para Dani
+
+        # 3. Formateo del Título (Summary)
+        titulo_evento = f"✂️ {req.name} | {servicio_ingles}"
+        if nombre_barbero != "Sin preferencia":
+            titulo_evento += f" (con {nombre_barbero})"
+            
+        # 4. Formateo de la Descripción
+        descripcion_evento = (
+            f"👤 Cliente: {req.name}\n"
+            f"💈 Servicio: {servicio_ingles}\n"
+            f"👨‍🎨 Peluquero: {nombre_barbero}\n"
+            f"📅 Fecha: {req.date}\n"
+            f"⏰ Hora: {req.time}\n"
+            f"---\n"
+            f"🤖 Agendado automáticamente por Marta"
+        )
             
         event = {
             'summary': titulo_evento,
+            'description': descripcion_evento,
             'start': {'dateTime': start_time},
             'end': {'dateTime': end_time},
-            'description': 'Reserva vía Marta Voice AI'
+            'colorId': color_evento  # <--- ¡Aquí se aplica el color!
         }
         service.events().insert(calendarId=cal_id, body=event).execute()
         return {"success": True, "message": "Cita agendada correctamente."}
