@@ -8,95 +8,57 @@ import os
 import json
 from typing import Optional
 
-app = FastAPI(title="Barbershop Appointment API (Canary Islands Edition)")
-
-# ── Google Calendar setup ────────────────────────────────────────────────────
+app = FastAPI(title="Peluqueria Kevin API - V2 (Con Barberos)")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 def get_calendar_service():
-    """Conecta con Google Calendar usando la Service Account."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if not creds_json:
-        raise HTTPException(status_code=500, detail="GOOGLE_CREDENTIALS no configurada")
-
+        raise HTTPException(status_code=500, detail="Credenciales no encontradas")
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return build('calendar', 'v3', credentials=creds)
 
 def get_calendar_id():
-    cal_id = os.environ.get("CALENDAR_ID")
-    if not cal_id:
-        raise HTTPException(status_code=500, detail="CALENDAR_ID no configurada")
-    return cal_id
+    return os.environ.get("CALENDAR_ID")
 
-# ── Modelos de Datos ─────────────────────────────────────────────────────────
+def get_time_bounds(date_str: str, time_str: str):
+    tz_canarias = ZoneInfo("Atlantic/Canary")
+    dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    start_dt = dt.replace(tzinfo=tz_canarias)
+    end_dt = start_dt + timedelta(minutes=30)
+    return start_dt.isoformat(), end_dt.isoformat()
 
+# ── NUEVOS MODELOS (Añadido el campo barber) ──
 class CheckAvailabilityRequest(BaseModel):
-    date: str        # YYYY-MM-DD
-    time: str        # HH:MM
+    date: str
+    time: str
     service: Optional[str] = None
+    barber: Optional[str] = None  # Nuevo
 
 class BookAppointmentRequest(BaseModel):
     name: str
     service: str
-    date: str        # YYYY-MM-DD
-    time: str        # HH:MM
+    date: str
+    time: str
+    barber: Optional[str] = "Sin preferencia"  # Nuevo
 
 class ModifyAppointmentRequest(BaseModel):
     name: str
-    current_date: str   # YYYY-MM-DD
-    new_date: str       # YYYY-MM-DD
-    new_time: str       # HH:MM
+    current_date: str
+    new_date: str
+    new_time: str
     service: Optional[str] = None
+    barber: Optional[str] = None
 
 class CancelAppointmentRequest(BaseModel):
     name: str
-    date: str        # YYYY-MM-DD
-
-# ── Funciones de Ayuda (Lógica Canaria) ──────────────────────────────────────
-
-def get_time_bounds(date_str: str, time_str: str):
-    """Calcula inicio y fin (30 min) con la zona horaria de Canarias."""
-    tz_canarias = ZoneInfo("Atlantic/Canary")
-    # Convertimos el texto a objeto fecha y le ponemos la zona horaria
-    naive_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-    start_dt = naive_dt.replace(tzinfo=tz_canarias)
-    end_dt = start_dt + timedelta(minutes=30)
-    return start_dt.isoformat(), end_dt.isoformat()
-
-def count_events_in_slot(service, calendar_id: str, start_time: str, end_time: str):
-    """Cuenta cuántos barberos están ocupados en ese hueco."""
-    events_result = service.events().list(
-        calendarId=calendar_id,
-        timeMin=start_time,
-        timeMax=end_time,
-        singleEvents=True
-    ).execute()
-    return len(events_result.get('items', []))
-
-def find_event_by_name(service, calendar_id: str, date_str: str, name: str):
-    """Busca una cita por nombre en un día específico."""
-    tz_canarias = ZoneInfo("Atlantic/Canary")
-    start_of_day = datetime.strptime(f"{date_str} 00:00", "%Y-%m-%d %H:%M").replace(tzinfo=tz_canarias).isoformat()
-    end_of_day = datetime.strptime(f"{date_str} 23:59", "%Y-%m-%d %H:%M").replace(tzinfo=tz_canarias).isoformat()
-    
-    events_result = service.events().list(
-        calendarId=calendar_id,
-        timeMin=start_of_day,
-        timeMax=end_of_day,
-        singleEvents=True,
-        q=name
-    ).execute()
-    
-    items = events_result.get('items', [])
-    return items[0] if items else None
-
-# ── Endpoints ────────────────────────────────────────────────────────────────
+    date: str
 
 @app.get("/")
 def root():
-    return {"status": "Barbershop API (Google Calendar) is running!"}
+    return {"status": "Running V2", "timezone": "Atlantic/Canary"}
 
 @app.post("/check_availability")
 def check_availability(req: CheckAvailabilityRequest):
@@ -104,9 +66,25 @@ def check_availability(req: CheckAvailabilityRequest):
         start_time, end_time = get_time_bounds(req.date, req.time)
         service = get_calendar_service()
         cal_id = get_calendar_id()
-        if count_events_in_slot(service, cal_id, start_time, end_time) >= 2:
-            return {"available": False, "message": "Hueco lleno (2 barberos ocupados)."}
-        return {"available": True, "message": "Hueco disponible."}
+        
+        events_result = service.events().list(
+            calendarId=cal_id, timeMin=start_time, timeMax=end_time, singleEvents=True
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        # Regla 1: Si hay 2 eventos, la peluquería entera está llena
+        if len(events) >= 2:
+            return {"available": False, "message": "Ambos peluqueros están ocupados en ese horario."}
+            
+        # Regla 2: Si el cliente pidió un barbero específico, miramos si ÉL está ocupado
+        if req.barber and req.barber.lower() != "sin preferencia":
+            for event in events:
+                # Buscamos el nombre del barbero en el título del evento
+                if req.barber.lower() in event.get('summary', '').lower():
+                    return {"available": False, "message": f"{req.barber} ya tiene una cita a esa hora. Pero el otro peluquero está libre."}
+
+        return {"available": True, "message": "Disponible."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -117,35 +95,40 @@ def book_appointment(req: BookAppointmentRequest):
         service = get_calendar_service()
         cal_id = get_calendar_id()
         
-        if count_events_in_slot(service, cal_id, start_time, end_time) >= 2:
-            return {"success": False, "message": "El hueco se acaba de ocupar."}
-
+        # Guardamos el nombre del barbero en el título para que la API pueda leerlo en el futuro
+        titulo_evento = f"{req.name} - {req.service}"
+        if req.barber and req.barber.lower() != "sin preferencia":
+            titulo_evento += f" (con {req.barber})"
+            
         event = {
-            'summary': f"{req.name} - {req.service}",
-            'description': 'Agendado por Marta (ElevenLabs)',
+            'summary': titulo_evento,
             'start': {'dateTime': start_time},
             'end': {'dateTime': end_time},
+            'description': 'Reserva vía Marta Voice AI'
         }
         service.events().insert(calendarId=cal_id, body=event).execute()
-        return {"success": True, "message": "Cita confirmada."}
+        return {"success": True, "message": "Cita agendada correctamente."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+def find_event_by_name(service, cal_id, date_str, name):
+    tz = ZoneInfo("Atlantic/Canary")
+    start = datetime.strptime(f"{date_str} 00:00", "%Y-%m-%d %H:%M").replace(tzinfo=tz).isoformat()
+    end = datetime.strptime(f"{date_str} 23:59", "%Y-%m-%d %H:%M").replace(tzinfo=tz).isoformat()
+    events = service.events().list(calendarId=cal_id, timeMin=start, timeMax=end, singleEvents=True, q=name).execute()
+    items = events.get('items', [])
+    return items[0] if items else None
 
 @app.post("/modify_appointment")
 def modify_appointment(req: ModifyAppointmentRequest):
     service = get_calendar_service()
     cal_id = get_calendar_id()
     event = find_event_by_name(service, cal_id, req.current_date, req.name)
-    if not event:
-        return {"success": False, "message": "No se encontró la cita."}
+    if not event: return {"success": False, "message": "No se encontró la cita."}
 
     new_start, new_end = get_time_bounds(req.new_date, req.new_time)
-    if count_events_in_slot(service, cal_id, new_start, new_end) >= 2:
-        return {"success": False, "message": "El nuevo horario está lleno."}
-
     event['start']['dateTime'] = new_start
     event['end']['dateTime'] = new_end
-    if req.service: event['summary'] = f"{req.name} - {req.service}"
     service.events().update(calendarId=cal_id, eventId=event['id'], body=event).execute()
     return {"success": True}
 
