@@ -11,7 +11,9 @@ from typing import Optional
 app = FastAPI(title="Peluqueria Kevin API - Vapi Edition")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-
+@app.get("/")
+def root():
+    return {"status": "🚀 La API de Peluquería Kevin está funcionando perfectamente con Vapi"}
 # --- FUNCIONES DE APOYO (SE MANTIENEN IGUAL) ---
 def get_calendar_service():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
