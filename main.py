@@ -13,7 +13,28 @@ app = FastAPI(title="Peluqueria Kevin API - Vapi Edition")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 @app.get("/")
 def root():
-    return {"status": "🚀 La API de Peluquería Kevin está funcionando perfectamente con Vapi"}
+    try:
+        # 1. Comprobamos si las variables de entorno existen
+        if not os.environ.get("GOOGLE_CREDENTIALS"):
+            return {"status": "🔴 ERROR", "message": "Falta la variable GOOGLE_CREDENTIALS en Render"}
+        if not os.environ.get("CALENDAR_ID"):
+            return {"status": "🔴 ERROR", "message": "Falta la variable CALENDAR_ID en Render"}
+        
+        # 2. Intentamos construir el servicio para ver si el JSON de las credenciales es válido
+        get_calendar_service()
+
+        # Si llega hasta aquí sin explotar, es que todo funciona de verdad
+        return {
+            "status": "🟢 ONLINE", 
+            "message": "La API está conectada a Google Calendar y lista para Vapi 🚀",
+            "timezone": "Atlantic/Canary"
+        }
+    except Exception as e:
+        # Si las credenciales están mal escritas o caducadas, te saldrá esto
+        return {
+            "status": "🔴 OFFLINE", 
+            "message": f"Error interno en la conexión: {str(e)}"
+        }
 # --- FUNCIONES DE APOYO (SE MANTIENEN IGUAL) ---
 def get_calendar_service():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
