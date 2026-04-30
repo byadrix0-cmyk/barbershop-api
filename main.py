@@ -31,7 +31,7 @@ MONTHS_ES = {
 # Ajusta estos valores según el horario real de la peluquería
 HORA_APERTURA = 9   # 09:00
 HORA_CIERRE = 21     # 21:00 (última cita a las 20:30)
-DIAS_CERRADO = {6}   # 6 = domingo. Añade 5 para cerrar sábados también.
+DIAS_CERRADO = {5, 6}  # 5 = sábado, 6 = domingo. Ahora sí rechaza los fines de semana.
 MAX_CITAS_SIMULTANEAS = 2  # Número de barberos disponibles
 
 TRANSLATIONS = {
