@@ -34,12 +34,29 @@ HORA_CIERRE = 21     # 21:00 (última cita a las 20:30)
 DIAS_CERRADO = {6}   # 6 = domingo. Añade 5 para cerrar sábados también.
 MAX_CITAS_SIMULTANEAS = 2  # Número de barberos disponibles
 
+TRANSLATIONS = {
+    "corte": "Haircut", "barba": "Beard Trim",
+    "tinte": "Hair Color", "tratamiento": "Hair Treatment"
+}
+
 # --- FUNCIONES DE APOYO ---
+
+def _validar_fecha_no_pasada(dt: datetime):
+    """Rechaza fechas anteriores a hoy."""
+    now = datetime.now(TZ_CANARIAS)
+    if dt.date() < now.date():
+        raise ValueError(f"Esa fecha ya ha pasado. Hoy es {DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month]}.")
+
+def _validar_dia_laborable(dt: datetime):
+    """Rechaza días en los que la peluquería está cerrada."""
+    if dt.weekday() in DIAS_CERRADO:
+        dia_nombre = DAYS_ES[dt.weekday()]
+        raise ValueError(f"El {dia_nombre} estamos cerrados. Prueba otro día.")
 
 def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
     """Traduce texto de fecha a formato YYYY-MM-DD + versión legible."""
     if not texto_fecha or str(texto_fecha).lower().strip() in ("null", "none", ""):
-        raise ValueError("Fecha vacía")
+        raise ValueError("No he entendido bien el día. ¿Me lo puedes repetir?")
 
     texto_fecha = texto_fecha.strip()
 
@@ -51,7 +68,7 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
         dia_legible = f"{DAYS_ES[dt.weekday()]} {dt.day} de {MONTHS_ES[dt.month]}"
         return dt.strftime("%Y-%m-%d"), dia_legible
     except ValueError as e:
-        if "pasada" in str(e) or "cerrado" in str(e):
+        if "pasado" in str(e) or "cerrado" in str(e):
             raise
         pass
 
@@ -71,28 +88,13 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
         parsed = parsed.replace(tzinfo=TZ_CANARIAS)
         # Si dateparser devuelve una fecha pasada para "hoy", corregir
         if parsed.date() < now.date():
-            raise ValueError("Esa fecha ya ha pasado")
+            raise ValueError("Esa fecha ya ha pasado. ¿Para cuándo la querías?")
         _validar_fecha_no_pasada(parsed)
         _validar_dia_laborable(parsed)
         dia_legible = f"{DAYS_ES[parsed.weekday()]} {parsed.day} de {MONTHS_ES[parsed.month]}"
         return parsed.strftime("%Y-%m-%d"), dia_legible
     else:
-        raise ValueError("No entendí la fecha")
-
-
-def _validar_fecha_no_pasada(dt: datetime):
-    """Rechaza fechas anteriores a hoy."""
-    now = datetime.now(TZ_CANARIAS)
-    if dt.date() < now.date():
-        raise ValueError(f"Esa fecha ya ha pasada. Hoy es {DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month]}.")
-
-
-def _validar_dia_laborable(dt: datetime):
-    """Rechaza días en los que la peluquería está cerrada."""
-    if dt.weekday() in DIAS_CERRADO:
-        dia_nombre = DAYS_ES[dt.weekday()]
-        raise ValueError(f"El {dia_nombre} estamos cerrado. Prueba otro día.")
-
+        raise ValueError("No he entendido la fecha exacta. ¿Podrías decírmela de otra forma?")
 
 def parsear_hora(time_str: str) -> tuple[int, int]:
     """Parsea una hora en múltiples formatos y devuelve (hora_24h, minuto)."""
@@ -108,8 +110,11 @@ def parsear_hora(time_str: str) -> tuple[int, int]:
 
     # Parsear componentes
     parts = text.split(":")
-    hora = int(parts[0])
-    minuto = int(parts[1]) if len(parts) > 1 else 0
+    try:
+        hora = int(parts[0])
+        minuto = int(parts[1]) if len(parts) > 1 else 0
+    except:
+        raise ValueError("No he entendido bien la hora. ¿Me la repites?")
 
     # Aplicar AM/PM
     if is_pm and hora < 12:
@@ -119,25 +124,21 @@ def parsear_hora(time_str: str) -> tuple[int, int]:
 
     # Validar rango
     if not (0 <= hora <= 23 and 0 <= minuto <= 59):
-        raise ValueError("Hora fuera de rango")
+        raise ValueError("Esa hora no es válida.")
 
     return hora, minuto
-
 
 def get_time_bounds(date_str: str, time_str: str) -> tuple[str, str]:
     """Calcula inicio y fin del slot (30 min) con validación de horario comercial."""
     hora, minuto = parsear_hora(time_str)
 
     if hora < HORA_APERTURA or hora >= HORA_CIERRE:
-        raise ValueError(
-            f"Fuera de horario. Nuestro horario es de {HORA_APERTURA}:00 a {HORA_CIERRE}:00."
-        )
+        raise ValueError(f"A esa hora estamos cerrados. Nuestro horario es de {HORA_APERTURA}:00 a {HORA_CIERRE}:00.")
 
     dt = datetime.strptime(f"{date_str} {hora:02d}:{minuto:02d}", "%Y-%m-%d %H:%M")
     start_dt = dt.replace(tzinfo=TZ_CANARIAS)
     end_dt = start_dt + timedelta(minutes=30)
     return start_dt.isoformat(), end_dt.isoformat()
-
 
 def get_calendar_service():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
@@ -147,20 +148,17 @@ def get_calendar_service():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return build('calendar', 'v3', credentials=creds)
 
-
 def get_calendar_id():
     cal_id = os.environ.get("CALENDAR_ID")
     if not cal_id:
         raise HTTPException(status_code=500, detail="CALENDAR_ID no configurado")
     return cal_id
 
-
 def sanitizar_barbero(barber: Optional[str]) -> str:
     """Normaliza el campo barbero. Devuelve nombre capitalizado o 'Sin preferencia'."""
     if not barber or str(barber).lower().strip() in ("null", "none", ""):
         return "Sin preferencia"
     return barber.strip().capitalize()
-
 
 def buscar_eventos_dia(service, fecha_str: str) -> list:
     """Busca todos los eventos de un día completo."""
@@ -173,7 +171,6 @@ def buscar_eventos_dia(service, fecha_str: str) -> list:
         singleEvents=True
     ).execute().get('items', [])
 
-
 def filtrar_eventos_cliente(events: list, nombre: str) -> list:
     """Filtra eventos que pertenecen al cliente por nombre (antes del '|')."""
     nombre_lower = nombre.lower().strip()
@@ -181,13 +178,6 @@ def filtrar_eventos_cliente(events: list, nombre: str) -> list:
         e for e in events
         if nombre_lower in e.get('summary', '').split('|')[0].lower()
     ]
-
-
-TRANSLATIONS = {
-    "corte": "Haircut", "barba": "Beard Trim",
-    "tinte": "Hair Color", "tratamiento": "Hair Treatment"
-}
-
 
 def color_barbero(nombre_barbero: str) -> str:
     """Devuelve el colorId de Google Calendar según barbero."""
@@ -200,6 +190,41 @@ def color_barbero(nombre_barbero: str) -> str:
 
 
 # --- MODELOS DE DATOS ---
+
+class CheckAvailabilityRequest(BaseModel):
+    date: str
+    time: str
+    barber: Optional[str] = None
+
+class BookAppointmentRequest(BaseModel):
+    name: str
+    service: str
+    date: str
+    time: str
+    barber: Optional[str] = None
+
+class ModifyAppointmentRequest(BaseModel):
+    name: str
+    current_date: str
+    new_date: str
+    new_time: str
+    barber: Optional[str] = None
+
+class CancelAppointmentRequest(BaseModel):
+    name: str
+    date: str
+
+
+# --- ENDPOINTS ---
+
+@app.get("/")
+def root():
+    return {"status": "🟢 ONLINE", "message": "API lista para ElevenLabs 🚀"}
+
+
+@app.post("/check_availability")
+def check_availability(req: CheckAvailabilityRequest):
+    try:
         barbero = sanitizar_barbero(req.barber)
 
         fecha_exacta, dia_legible = resolver_fecha_inteligente(req.date)
