@@ -143,8 +143,9 @@ def check_availability(req: CheckAvailabilityRequest):
         service = get_calendar_service()
         cal_id_google = get_calendar_id()
         
+        # EL ERROR ESTABA AQUÍ: Ponía timeMax=end_search en lugar de end_time
         events_result = service.events().list(
-            calendarId=cal_id_google, timeMin=start_time, timeMax=end_search, singleEvents=True
+            calendarId=cal_id_google, timeMin=start_time, timeMax=end_time, singleEvents=True
         ).execute()
         
         events = events_result.get('items', [])
@@ -163,6 +164,7 @@ def check_availability(req: CheckAvailabilityRequest):
 
         return {"status": "success", "message": msg if is_available else f"No disponible: {msg}"}
     except Exception as e:
+        print(f"Error en check_availability: {str(e)}") # Esto lo imprimirá en los logs de Render
         return {"status": "error", "message": str(e)}
 
 
