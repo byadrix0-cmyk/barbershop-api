@@ -92,6 +92,11 @@ def normalizar_fecha_espanol(texto: str) -> Optional[datetime]:
 
     now = datetime.now(TZ_CANARIAS)
 
+    # Si el texto contiene un número (ej: "el miércoles 13", "el 25 de mayo"),
+    # NO usar este normalizador — dejar que dateparser lo resuelva con el número.
+    if re.search(r'\d', t_sin_acentos):
+        return None
+
     # "hoy"
     if t_sin_acentos in ("hoy",):
         return now
@@ -128,26 +133,28 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
 
     texto_fecha = texto_fecha.strip()
 
-    # Intento 1: formato ISO directo
-    try:
-        dt = datetime.strptime(texto_fecha, "%Y-%m-%d").replace(tzinfo=TZ_CANARIAS)
-        _validar_fecha_no_pasada(dt)
-        _validar_dia_laborable(dt)
-        dia_legible = f"{DAYS_ES[dt.weekday()]} {dt.day} de {MONTHS_ES[dt.month]}"
-        return dt.strftime("%Y-%m-%d"), dia_legible
-    except ValueError as e:
-        if "pasado" in str(e) or "cerrado" in str(e):
+    # Intento 1: formato ISO directo (solo si parece un YYYY-MM-DD)
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', texto_fecha):
+        try:
+            dt = datetime.strptime(texto_fecha, "%Y-%m-%d").replace(tzinfo=TZ_CANARIAS)
+            _validar_fecha_no_pasada(dt)
+            _validar_dia_laborable(dt)
+            dia_legible = f"{DAYS_ES[dt.weekday()]} {dt.day} de {MONTHS_ES[dt.month]}"
+            return dt.strftime("%Y-%m-%d"), dia_legible
+        except ValueError:
+            # Si la validación de fecha pasada/cerrada falla, propagar
             raise
-        pass
 
     # Intento 2: normalizador de español (días de semana, hoy, mañana, etc.)
     parsed = normalizar_fecha_espanol(texto_fecha)
 
-    # Intento 3: dateparser para fechas más complejas (ej: "25 de mayo")
+    # Intento 3: dateparser para fechas más complejas (ej: "25 de mayo", "miércoles 13")
     if parsed is None:
         now = datetime.now(TZ_CANARIAS)
+        # Quitar artículos iniciales que confunden a dateparser ("el", "la", "los")
+        texto_para_parser = re.sub(r'^(el|la|los|las)\s+', '', texto_fecha.lower()).strip()
         parsed = dateparser.parse(
-            texto_fecha,
+            texto_para_parser,
             languages=['es'],
             settings={
                 'PREFER_DATES_FROM': 'future',
