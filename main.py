@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -10,7 +10,7 @@ import dateparser
 import re
 from typing import Optional
 
-app = FastAPI(title="Peluqueria Kevin API - ElevenLabs Edition (Blindada)")
+app = FastAPI(title="Peluqueria Kevin API - Vapi Edition")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
@@ -28,33 +28,105 @@ MONTHS_ES = {
 }
 
 # --- CONFIGURACIÓN DEL NEGOCIO ---
-# Ajusta estos valores según el horario real de la peluquería
-HORA_APERTURA = 9   # 09:00
-HORA_CIERRE = 21     # 21:00 (última cita a las 20:30)
-DIAS_CERRADO = {5, 6}  # 5 = sábado, 6 = domingo. Ahora sí rechaza los fines de semana.
-MAX_CITAS_SIMULTANEAS = 2  # Número de barberos disponibles
+HORA_APERTURA = 9
+HORA_CIERRE = 21
+DIAS_CERRADO = {5, 6}  # sábado, domingo
+MAX_CITAS_SIMULTANEAS = 2
 
 TRANSLATIONS = {
     "corte": "Haircut", "barba": "Beard Trim",
     "tinte": "Hair Color", "tratamiento": "Hair Treatment"
 }
 
-# --- FUNCIONES DE APOYO ---
+
+# =====================================================
+# WRAPPER PARA VAPI
+# =====================================================
+# Vapi envía tool calls con este formato:
+# {
+#   "message": {
+#     "type": "tool-calls",
+#     "toolCallList": [
+#       {
+#         "id": "toolu_xxx",
+#         "name": "check_availability",
+#         "arguments": { "date": "mañana", "time": "15:00" }
+#       }
+#     ]
+#   }
+# }
+#
+# Y espera respuesta con este formato:
+# {
+#   "results": [
+#     {
+#       "toolCallId": "toolu_xxx",
+#       "result": "texto o JSON string"
+#     }
+#   ]
+# }
+# =====================================================
+
+@app.post("/vapi/tool-handler")
+async def vapi_tool_handler(request: Request):
+    """
+    Endpoint único que recibe TODOS los tool calls de Vapi,
+    los routea a la función correcta, y devuelve el resultado
+    en el formato que Vapi espera.
+    """
+    try:
+        body = await request.json()
+        message = body.get("message", {})
+        tool_call_list = message.get("toolCallList", [])
+
+        if not tool_call_list:
+            return {"results": []}
+
+        results = []
+        for tool_call in tool_call_list:
+            tool_call_id = tool_call.get("id", "")
+            tool_name = tool_call.get("name", "")
+            args = tool_call.get("arguments", {})
+
+            # Routear al handler correcto
+            if tool_name == "check_availability":
+                result = _handle_check_availability(args)
+            elif tool_name == "book_appointment":
+                result = _handle_book_appointment(args)
+            elif tool_name == "modify_appointment":
+                result = _handle_modify_appointment(args)
+            elif tool_name == "cancel_appointment":
+                result = _handle_cancel_appointment(args)
+            else:
+                result = f"Herramienta desconocida: {tool_name}"
+
+            results.append({
+                "toolCallId": tool_call_id,
+                "result": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+            })
+
+        return {"results": results}
+
+    except Exception as e:
+        # Si algo falla, devolver error en formato Vapi
+        return {"results": [{"toolCallId": "", "result": f"Error del servidor: {str(e)}"}]}
+
+
+# =====================================================
+# FUNCIONES DE APOYO (sin cambios)
+# =====================================================
 
 def _validar_fecha_no_pasada(dt: datetime):
-    """Rechaza fechas anteriores a hoy."""
     now = datetime.now(TZ_CANARIAS)
     if dt.date() < now.date():
         raise ValueError(f"Esa fecha ya ha pasado. Hoy es {DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month]}.")
 
 def _validar_dia_laborable(dt: datetime):
-    """Rechaza días en los que la peluquería está cerrada."""
     if dt.weekday() in DIAS_CERRADO:
         dia_nombre = DAYS_ES[dt.weekday()]
         raise ValueError(f"El {dia_nombre} estamos cerrados. Prueba otro día.")
 
 def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
-    """Traduce texto de fecha a formato YYYY-MM-DD + versión legible."""
     if not texto_fecha or str(texto_fecha).lower().strip() in ("null", "none", ""):
         raise ValueError("No he entendido bien el día. ¿Me lo puedes repetir?")
 
@@ -72,7 +144,7 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
             raise
         pass
 
-    # Intento 2: dateparser para lenguaje natural
+    # Intento 2: dateparser
     now = datetime.now(TZ_CANARIAS)
     parsed = dateparser.parse(
         texto_fecha,
@@ -86,7 +158,6 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
 
     if parsed:
         parsed = parsed.replace(tzinfo=TZ_CANARIAS)
-        # Si dateparser devuelve una fecha pasada para "hoy", corregir
         if parsed.date() < now.date():
             raise ValueError("Esa fecha ya ha pasado. ¿Para cuándo la querías?")
         _validar_fecha_no_pasada(parsed)
@@ -97,44 +168,29 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
         raise ValueError("No he entendido la fecha exacta. ¿Podrías decírmela de otra forma?")
 
 def parsear_hora(time_str: str) -> tuple[int, int]:
-    """Parsea una hora en múltiples formatos y devuelve (hora_24h, minuto)."""
     text = str(time_str).strip().lower()
-
-    # Detectar AM/PM antes de limpiar
     is_pm = "pm" in text or "p.m" in text
     is_am = "am" in text or "a.m" in text
-
-    # Limpiar texto
-    text = re.sub(r'[apm.\s:h]+$', '', text)  # quitar sufijos
-    text = text.replace("h", ":").replace(".", ":")  # normalizar separadores
-
-    # Parsear componentes
+    text = re.sub(r'[apm.\s:h]+$', '', text)
+    text = text.replace("h", ":").replace(".", ":")
     parts = text.split(":")
     try:
         hora = int(parts[0])
         minuto = int(parts[1]) if len(parts) > 1 else 0
     except:
         raise ValueError("No he entendido bien la hora. ¿Me la repites?")
-
-    # Aplicar AM/PM
     if is_pm and hora < 12:
         hora += 12
     elif is_am and hora == 12:
         hora = 0
-
-    # Validar rango
     if not (0 <= hora <= 23 and 0 <= minuto <= 59):
         raise ValueError("Esa hora no es válida.")
-
     return hora, minuto
 
 def get_time_bounds(date_str: str, time_str: str) -> tuple[str, str]:
-    """Calcula inicio y fin del slot (30 min) con validación de horario comercial."""
     hora, minuto = parsear_hora(time_str)
-
     if hora < HORA_APERTURA or hora >= HORA_CIERRE:
         raise ValueError(f"A esa hora estamos cerrados. Nuestro horario es de {HORA_APERTURA}:00 a {HORA_CIERRE}:00.")
-
     dt = datetime.strptime(f"{date_str} {hora:02d}:{minuto:02d}", "%Y-%m-%d %H:%M")
     start_dt = dt.replace(tzinfo=TZ_CANARIAS)
     end_dt = start_dt + timedelta(minutes=30)
@@ -155,13 +211,11 @@ def get_calendar_id():
     return cal_id
 
 def sanitizar_barbero(barber: Optional[str]) -> str:
-    """Normaliza el campo barbero. Devuelve nombre capitalizado o 'Sin preferencia'."""
-    if not barber or str(barber).lower().strip() in ("null", "none", ""):
+    if not barber or str(barber).lower().strip() in ("null", "none", "", "sin preferencia"):
         return "Sin preferencia"
     return barber.strip().capitalize()
 
 def buscar_eventos_dia(service, fecha_str: str) -> list:
-    """Busca todos los eventos de un día completo."""
     start_search = datetime.strptime(f"{fecha_str} 00:00", "%Y-%m-%d %H:%M").replace(tzinfo=TZ_CANARIAS).isoformat()
     end_search = datetime.strptime(f"{fecha_str} 23:59", "%Y-%m-%d %H:%M").replace(tzinfo=TZ_CANARIAS).isoformat()
     return service.events().list(
@@ -172,7 +226,6 @@ def buscar_eventos_dia(service, fecha_str: str) -> list:
     ).execute().get('items', [])
 
 def filtrar_eventos_cliente(events: list, nombre: str) -> list:
-    """Filtra eventos que pertenecen al cliente por nombre (antes del '|')."""
     nombre_lower = nombre.lower().strip()
     return [
         e for e in events
@@ -180,7 +233,6 @@ def filtrar_eventos_cliente(events: list, nombre: str) -> list:
     ]
 
 def color_barbero(nombre_barbero: str) -> str:
-    """Devuelve el colorId de Google Calendar según barbero."""
     nombre = nombre_barbero.lower()
     if "kevin" in nombre:
         return "9"
@@ -189,7 +241,220 @@ def color_barbero(nombre_barbero: str) -> str:
     return "8"
 
 
-# --- MODELOS DE DATOS ---
+# =====================================================
+# HANDLERS INTERNOS (la lógica de negocio)
+# =====================================================
+
+def _handle_check_availability(args: dict) -> str:
+    try:
+        barbero = sanitizar_barbero(args.get("barber"))
+        fecha_exacta, dia_legible = resolver_fecha_inteligente(args.get("date", ""))
+        start_time, end_time = get_time_bounds(fecha_exacta, args.get("time", ""))
+
+        service = get_calendar_service()
+        events = service.events().list(
+            calendarId=get_calendar_id(),
+            timeMin=start_time,
+            timeMax=end_time,
+            singleEvents=True
+        ).execute().get('items', [])
+
+        hora, minuto = parsear_hora(args.get("time", ""))
+        hora_legible = f"{hora:02d}:{minuto:02d}"
+
+        if len(events) >= MAX_CITAS_SIMULTANEAS:
+            return json.dumps({
+                "status": "success",
+                "available": False,
+                "message": f"Dile al cliente: 'Lo siento, pero el {dia_legible} a las {hora_legible} estamos completos.'"
+            }, ensure_ascii=False)
+
+        if barbero != "Sin preferencia":
+            for event in events:
+                if barbero.lower() in event.get('summary', '').lower():
+                    other = "Dani" if barbero.lower() == "kevin" else "Kevin"
+                    return json.dumps({
+                        "status": "success",
+                        "available": False,
+                        "message": f"Dile al cliente: 'Justo a esa hora {barbero} está ocupado, pero el {dia_legible} a las {hora_legible} tengo hueco con {other}, ¿te parece bien?'"
+                    }, ensure_ascii=False)
+
+        return json.dumps({
+            "status": "success",
+            "available": True,
+            "message": f"Dile al cliente: 'Perfecto, sí tengo disponibilidad el {dia_legible} a las {hora_legible}. ¿Me indicas tu nombre completo?'"
+        }, ensure_ascii=False)
+
+    except ValueError as e:
+        return json.dumps({"status": "error", "message": f"Dile al cliente: '{str(e)}'"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+def _handle_book_appointment(args: dict) -> str:
+    try:
+        barbero = sanitizar_barbero(args.get("barber"))
+        fecha_exacta, dia_legible = resolver_fecha_inteligente(args.get("date", ""))
+        start_time, end_time = get_time_bounds(fecha_exacta, args.get("time", ""))
+        hora, minuto = parsear_hora(args.get("time", ""))
+        hora_legible = f"{hora:02d}:{minuto:02d}"
+
+        service = get_calendar_service()
+        events = service.events().list(
+            calendarId=get_calendar_id(),
+            timeMin=start_time,
+            timeMax=end_time,
+            singleEvents=True
+        ).execute().get('items', [])
+
+        if len(events) >= MAX_CITAS_SIMULTANEAS:
+            return json.dumps({
+                "status": "error",
+                "message": "Dile al cliente: 'Lo siento, ese hueco se acaba de ocupar. ¿Probamos otra hora?'"
+            }, ensure_ascii=False)
+
+        if barbero != "Sin preferencia":
+            for event in events:
+                if barbero.lower() in event.get('summary', '').lower():
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Dile al cliente: 'Lo siento, {barbero} acaba de ser reservado para esa hora. ¿Quieres probar con otro barbero u otra hora?'"
+                    }, ensure_ascii=False)
+
+        nombre = args.get("name", "").strip()
+        servicio_raw = args.get("service", "corte").lower().strip()
+        servicio_ingles = TRANSLATIONS.get(servicio_raw, servicio_raw.capitalize())
+
+        event = {
+            'summary': f"✂️ {nombre} | {servicio_ingles} (con {barbero})",
+            'description': f"Cliente: {nombre}\nBarbero: {barbero}\nServicio: {servicio_ingles}\nAgendado por Vapi",
+            'start': {'dateTime': start_time},
+            'end': {'dateTime': end_time},
+            'colorId': color_barbero(barbero)
+        }
+
+        service.events().insert(calendarId=get_calendar_id(), body=event).execute()
+        return json.dumps({
+            "status": "success",
+            "message": f"Dile al cliente: 'Perfecto {nombre}, tu cita está confirmada para el {dia_legible} a las {hora_legible} con {barbero}.'"
+        }, ensure_ascii=False)
+
+    except ValueError as e:
+        return json.dumps({"status": "error", "message": f"Dile al cliente: '{str(e)}'"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+def _handle_modify_appointment(args: dict) -> str:
+    try:
+        barbero = sanitizar_barbero(args.get("barber"))
+        curr_fecha_exacta, _ = resolver_fecha_inteligente(args.get("current_date", ""))
+        new_fecha_exacta, new_dia_legible = resolver_fecha_inteligente(args.get("new_date", ""))
+        new_start, new_end = get_time_bounds(new_fecha_exacta, args.get("new_time", ""))
+        hora, minuto = parsear_hora(args.get("new_time", ""))
+        hora_legible = f"{hora:02d}:{minuto:02d}"
+
+        nombre = args.get("name", "").strip()
+        service = get_calendar_service()
+
+        events = buscar_eventos_dia(service, curr_fecha_exacta)
+        eventos_del_cliente = filtrar_eventos_cliente(events, nombre)
+
+        if not eventos_del_cliente:
+            return json.dumps({
+                "status": "error",
+                "message": "Dile al cliente: 'No he podido encontrar ninguna cita a tu nombre para esa fecha.'"
+            }, ensure_ascii=False)
+
+        new_events = service.events().list(
+            calendarId=get_calendar_id(),
+            timeMin=new_start,
+            timeMax=new_end,
+            singleEvents=True
+        ).execute().get('items', [])
+
+        evento_original = eventos_del_cliente[0]
+        otros_eventos = [e for e in new_events if e['id'] != evento_original['id']]
+
+        if len(otros_eventos) >= MAX_CITAS_SIMULTANEAS:
+            return json.dumps({
+                "status": "error",
+                "message": f"Dile al cliente: 'Lo siento, el {new_dia_legible} a las {hora_legible} ya está completo. ¿Probamos otra hora?'"
+            }, ensure_ascii=False)
+
+        evento_original['start']['dateTime'] = new_start
+        evento_original['end']['dateTime'] = new_end
+
+        if barbero != "Sin preferencia":
+            summary_original = evento_original.get('summary', '')
+            servicio_original = "Corte"
+            if '|' in summary_original:
+                parte_servicio = summary_original.split('|')[1].strip()
+                if '(' in parte_servicio:
+                    servicio_original = parte_servicio.split('(')[0].strip()
+                else:
+                    servicio_original = parte_servicio.strip()
+            evento_original['summary'] = f"✂️ {nombre} | {servicio_original} (con {barbero})"
+            evento_original['colorId'] = color_barbero(barbero)
+
+        service.events().update(
+            calendarId=get_calendar_id(),
+            eventId=evento_original['id'],
+            body=evento_original
+        ).execute()
+
+        return json.dumps({
+            "status": "success",
+            "message": f"Dile al cliente: 'Genial, he modificado tu cita. Ha quedado para el {new_dia_legible} a las {hora_legible}.'"
+        }, ensure_ascii=False)
+
+    except ValueError as e:
+        return json.dumps({"status": "error", "message": f"Dile al cliente: '{str(e)}'"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+def _handle_cancel_appointment(args: dict) -> str:
+    try:
+        fecha_exacta, dia_legible = resolver_fecha_inteligente(args.get("date", ""))
+        nombre = args.get("name", "").strip()
+        service = get_calendar_service()
+
+        events = buscar_eventos_dia(service, fecha_exacta)
+        eventos_del_cliente = filtrar_eventos_cliente(events, nombre)
+
+        if not eventos_del_cliente:
+            return json.dumps({
+                "status": "error",
+                "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
+            }, ensure_ascii=False)
+
+        for evento in eventos_del_cliente:
+            service.events().delete(
+                calendarId=get_calendar_id(),
+                eventId=evento['id']
+            ).execute()
+
+        if len(eventos_del_cliente) > 1:
+            return json.dumps({
+                "status": "success",
+                "message": f"Dile al cliente: 'Tenías {len(eventos_del_cliente)} citas el {dia_legible}. Las he cancelado todas.'"
+            }, ensure_ascii=False)
+
+        return json.dumps({
+            "status": "success",
+            "message": f"Dile al cliente: 'Listo, tu cita del {dia_legible} ha sido cancelada correctamente.'"
+        }, ensure_ascii=False)
+
+    except ValueError as e:
+        return json.dumps({"status": "error", "message": f"Dile al cliente: '{str(e)}'"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+# =====================================================
+# ENDPOINTS ORIGINALES (se mantienen para compatibilidad / testing directo)
+# =====================================================
 
 class CheckAvailabilityRequest(BaseModel):
     date: str
@@ -215,231 +480,26 @@ class CancelAppointmentRequest(BaseModel):
     date: str
 
 
-# --- ENDPOINTS ---
-
 @app.get("/")
 def root():
-    return {"status": "🟢 ONLINE", "message": "API lista para ElevenLabs 🚀"}
+    return {"status": "🟢 ONLINE", "message": "API lista para Vapi 🚀"}
 
 
 @app.post("/check_availability")
 def check_availability(req: CheckAvailabilityRequest):
-    try:
-        barbero = sanitizar_barbero(req.barber)
-
-        fecha_exacta, dia_legible = resolver_fecha_inteligente(req.date)
-        start_time, end_time = get_time_bounds(fecha_exacta, req.time)
-
-        service = get_calendar_service()
-        events = service.events().list(
-            calendarId=get_calendar_id(),
-            timeMin=start_time,
-            timeMax=end_time,
-            singleEvents=True
-        ).execute().get('items', [])
-
-        # Hora legible normalizada (usar la parseada, no la raw)
-        hora, minuto = parsear_hora(req.time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
-
-        if len(events) >= MAX_CITAS_SIMULTANEAS:
-            return {
-                "status": "success",
-                "available": False,
-                "message": f"Dile al cliente: 'Lo siento, pero el {dia_legible} a las {hora_legible} estamos completos.'"
-            }
-
-        if barbero != "Sin preferencia":
-            for event in events:
-                if barbero.lower() in event.get('summary', '').lower():
-                    other = "Dani" if barbero.lower() == "kevin" else "Kevin"
-                    return {
-                        "status": "success",
-                        "available": False,
-                        "message": f"Dile al cliente: 'Justo a esa hora {barbero} está ocupado, pero el {dia_legible} a las {hora_legible} tengo hueco con {other}, ¿te parece bien?'"
-                    }
-
-        return {
-            "status": "success",
-            "available": True,
-            "message": f"Dile al cliente: 'Perfecto, sí tengo disponibilidad el {dia_legible} a las {hora_legible}. ¿Me indicas tu nombre completo?'"
-        }
-
-    except ValueError as e:
-        return {"status": "error", "message": f"Dile al cliente: '{str(e)}'"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return json.loads(_handle_check_availability(req.dict()))
 
 
 @app.post("/book_appointment")
 def book_appointment(req: BookAppointmentRequest):
-    try:
-        barbero = sanitizar_barbero(req.barber)
-
-        fecha_exacta, dia_legible = resolver_fecha_inteligente(req.date)
-        start_time, end_time = get_time_bounds(fecha_exacta, req.time)
-
-        hora, minuto = parsear_hora(req.time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
-
-        # Verificar disponibilidad antes de reservar (evita doble booking)
-        service = get_calendar_service()
-        events = service.events().list(
-            calendarId=get_calendar_id(),
-            timeMin=start_time,
-            timeMax=end_time,
-            singleEvents=True
-        ).execute().get('items', [])
-
-        if len(events) >= MAX_CITAS_SIMULTANEAS:
-            return {
-                "status": "error",
-                "message": f"Dile al cliente: 'Lo siento, ese hueco se acaba de ocupar. ¿Probamos otra hora?'"
-            }
-
-        if barbero != "Sin preferencia":
-            for event in events:
-                if barbero.lower() in event.get('summary', '').lower():
-                    return {
-                        "status": "error",
-                        "message": f"Dile al cliente: 'Lo siento, {barbero} acaba de ser reservado para esa hora. ¿Quieres probar con otro barbero u otra hora?'"
-                    }
-
-        servicio_ingles = TRANSLATIONS.get(req.service.lower().strip(), req.service.strip().capitalize())
-
-        event = {
-            'summary': f"✂️ {req.name.strip()} | {servicio_ingles} (con {barbero})",
-            'description': f"Cliente: {req.name.strip()}\nBarbero: {barbero}\nServicio: {servicio_ingles}\nAgendado por ElevenLabs",
-            'start': {'dateTime': start_time},
-            'end': {'dateTime': end_time},
-            'colorId': color_barbero(barbero)
-        }
-
-        service.events().insert(calendarId=get_calendar_id(), body=event).execute()
-        return {
-            "status": "success",
-            "message": f"Dile al cliente: 'Perfecto {req.name.strip()}, tu cita está confirmada para el {dia_legible} a las {hora_legible} con {barbero}.'"
-        }
-
-    except ValueError as e:
-        return {"status": "error", "message": f"Dile al cliente: '{str(e)}'"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return json.loads(_handle_book_appointment(req.dict()))
 
 
 @app.post("/modify_appointment")
 def modify_appointment(req: ModifyAppointmentRequest):
-    try:
-        barbero = sanitizar_barbero(req.barber)
-
-        curr_fecha_exacta, _ = resolver_fecha_inteligente(req.current_date)
-        new_fecha_exacta, new_dia_legible = resolver_fecha_inteligente(req.new_date)
-        new_start, new_end = get_time_bounds(new_fecha_exacta, req.new_time)
-
-        hora, minuto = parsear_hora(req.new_time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
-
-        service = get_calendar_service()
-
-        # Buscar cita original
-        events = buscar_eventos_dia(service, curr_fecha_exacta)
-        eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
-
-        if not eventos_del_cliente:
-            return {
-                "status": "error",
-                "message": "Dile al cliente: 'No he podido encontrar ninguna cita a tu nombre para esa fecha.'"
-            }
-
-        # Verificar disponibilidad en el nuevo slot (excluyendo la cita actual)
-        new_events = service.events().list(
-            calendarId=get_calendar_id(),
-            timeMin=new_start,
-            timeMax=new_end,
-            singleEvents=True
-        ).execute().get('items', [])
-
-        evento_original = eventos_del_cliente[0]
-        # Excluir el propio evento del conteo
-        otros_eventos = [e for e in new_events if e['id'] != evento_original['id']]
-
-        if len(otros_eventos) >= MAX_CITAS_SIMULTANEAS:
-            return {
-                "status": "error",
-                "message": f"Dile al cliente: 'Lo siento, el {new_dia_legible} a las {hora_legible} ya está completo. ¿Probamos otra hora?'"
-            }
-
-        # Actualizar hora
-        evento_original['start']['dateTime'] = new_start
-        evento_original['end']['dateTime'] = new_end
-
-        # Actualizar barbero si se indicó uno nuevo, manteniendo el servicio original
-        if barbero != "Sin preferencia":
-            # Extraer servicio original del summary: "✂️ Nombre | Servicio (con Barbero)"
-            summary_original = evento_original.get('summary', '')
-            servicio_original = "Corte"  # fallback
-            if '|' in summary_original:
-                parte_servicio = summary_original.split('|')[1].strip()
-                # Quitar "(con Barbero)" si existe
-                if '(' in parte_servicio:
-                    servicio_original = parte_servicio.split('(')[0].strip()
-                else:
-                    servicio_original = parte_servicio.strip()
-
-            evento_original['summary'] = f"✂️ {req.name.strip()} | {servicio_original} (con {barbero})"
-            evento_original['colorId'] = color_barbero(barbero)
-
-        service.events().update(
-            calendarId=get_calendar_id(),
-            eventId=evento_original['id'],
-            body=evento_original
-        ).execute()
-
-        return {
-            "status": "success",
-            "message": f"Dile al cliente: 'Genial, he modificado tu cita. Ha quedado para el {new_dia_legible} a las {hora_legible}.'"
-        }
-
-    except ValueError as e:
-        return {"status": "error", "message": f"Dile al cliente: '{str(e)}'"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return json.loads(_handle_modify_appointment(req.dict()))
 
 
 @app.post("/cancel_appointment")
 def cancel_appointment(req: CancelAppointmentRequest):
-    try:
-        fecha_exacta, dia_legible = resolver_fecha_inteligente(req.date)
-        service = get_calendar_service()
-
-        events = buscar_eventos_dia(service, fecha_exacta)
-        eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
-
-        if not eventos_del_cliente:
-            return {
-                "status": "error",
-                "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
-            }
-
-        # Si tiene múltiples citas ese día, cancelar todas y avisar
-        for evento in eventos_del_cliente:
-            service.events().delete(
-                calendarId=get_calendar_id(),
-                eventId=evento['id']
-            ).execute()
-
-        if len(eventos_del_cliente) > 1:
-            return {
-                "status": "success",
-                "message": f"Dile al cliente: 'Tenías {len(eventos_del_cliente)} citas el {dia_legible}. Las he cancelado todas.'"
-            }
-
-        return {
-            "status": "success",
-            "message": f"Dile al cliente: 'Listo, tu cita del {dia_legible} ha sido cancelada correctamente.'"
-        }
-
-    except ValueError as e:
-        return {"status": "error", "message": f"Dile al cliente: '{str(e)}'"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return json.loads(_handle_cancel_appointment(req.dict()))
