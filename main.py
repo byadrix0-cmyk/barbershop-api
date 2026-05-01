@@ -27,6 +27,12 @@ MONTHS_ES = {
     9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
 }
 
+# Mapeo de días de la semana en español a número de weekday
+DIAS_SEMANA = {
+    "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2,
+    "jueves": 3, "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6
+}
+
 # --- CONFIGURACIÓN DEL NEGOCIO ---
 HORA_APERTURA = 9
 HORA_CIERRE = 21
@@ -53,6 +59,68 @@ def _validar_dia_laborable(dt: datetime):
         dia_nombre = DAYS_ES[dt.weekday()]
         raise ValueError(f"El {dia_nombre} estamos cerrados. Prueba otro día.")
 
+
+def _calcular_dia_semana(dia_objetivo: int, semana_que_viene: bool = False) -> datetime:
+    """
+    Calcula la próxima ocurrencia de un día de la semana.
+    - dia_objetivo: 0=lunes, 1=martes, ..., 6=domingo
+    - semana_que_viene: si True, salta a la siguiente semana
+    """
+    now = datetime.now(TZ_CANARIAS)
+    dias_hasta = (dia_objetivo - now.weekday()) % 7
+
+    # Si es hoy mismo, asumir la próxima semana
+    if dias_hasta == 0:
+        dias_hasta = 7
+
+    # Si pidió "que viene/próximo", saltar a la siguiente semana
+    if semana_que_viene and dias_hasta < 7:
+        dias_hasta += 7
+
+    return now + timedelta(days=dias_hasta)
+
+
+def normalizar_fecha_espanol(texto: str) -> Optional[datetime]:
+    """
+    Pre-procesa expresiones comunes en español que dateparser no entiende bien.
+    Devuelve datetime si reconoce el patrón, None si no.
+    """
+    t = texto.lower().strip()
+    # Quitar acentos para matching más flexible
+    t_sin_acentos = (t.replace("á", "a").replace("é", "e").replace("í", "i")
+                      .replace("ó", "o").replace("ú", "u"))
+
+    now = datetime.now(TZ_CANARIAS)
+
+    # "hoy"
+    if t_sin_acentos in ("hoy",):
+        return now
+
+    # "mañana"
+    if t_sin_acentos in ("manana", "mañana"):
+        return now + timedelta(days=1)
+
+    # "pasado mañana"
+    if "pasado manana" in t_sin_acentos or "pasado mañana" in t:
+        return now + timedelta(days=2)
+
+    # Patrones con días de semana
+    for dia_nombre, dia_num in DIAS_SEMANA.items():
+        if dia_nombre in t_sin_acentos:
+            # Detectar si pide la semana que viene
+            indicadores_proximo = [
+                "que viene", "proximo", "próximo", "proxima", "próxima",
+                "siguiente", "que entra"
+            ]
+            es_proximo = any(ind in t_sin_acentos for ind in indicadores_proximo)
+
+            # "este lunes" / "el lunes" → próxima ocurrencia
+            # "el lunes que viene" / "próximo lunes" → siguiente semana
+            return _calcular_dia_semana(dia_num, semana_que_viene=es_proximo)
+
+    return None
+
+
 def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
     """Traduce texto de fecha a formato YYYY-MM-DD + versión legible."""
     if not texto_fecha or str(texto_fecha).lower().strip() in ("null", "none", ""):
@@ -72,21 +140,28 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
             raise
         pass
 
-    # Intento 2: dateparser para lenguaje natural
-    now = datetime.now(TZ_CANARIAS)
-    parsed = dateparser.parse(
-        texto_fecha,
-        languages=['es'],
-        settings={
-            'PREFER_DATES_FROM': 'future',
-            'RELATIVE_BASE': now.replace(tzinfo=None),
-            'RETURN_AS_TIMEZONE_AWARE': False,
-        }
-    )
+    # Intento 2: normalizador de español (días de semana, hoy, mañana, etc.)
+    parsed = normalizar_fecha_espanol(texto_fecha)
+
+    # Intento 3: dateparser para fechas más complejas (ej: "25 de mayo")
+    if parsed is None:
+        now = datetime.now(TZ_CANARIAS)
+        parsed = dateparser.parse(
+            texto_fecha,
+            languages=['es'],
+            settings={
+                'PREFER_DATES_FROM': 'future',
+                'RELATIVE_BASE': now.replace(tzinfo=None),
+                'RETURN_AS_TIMEZONE_AWARE': False,
+            }
+        )
+        if parsed:
+            parsed = parsed.replace(tzinfo=TZ_CANARIAS)
 
     if parsed:
-        parsed = parsed.replace(tzinfo=TZ_CANARIAS)
-        if parsed.date() < now.date():
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TZ_CANARIAS)
+        if parsed.date() < datetime.now(TZ_CANARIAS).date():
             raise ValueError("Esa fecha ya ha pasado. ¿Para cuándo la querías?")
         _validar_fecha_no_pasada(parsed)
         _validar_dia_laborable(parsed)
@@ -94,6 +169,7 @@ def resolver_fecha_inteligente(texto_fecha: str) -> tuple[str, str]:
         return parsed.strftime("%Y-%m-%d"), dia_legible
     else:
         raise ValueError("No he entendido la fecha exacta. ¿Podrías decírmela de otra forma?")
+
 
 def parsear_hora(time_str: str) -> tuple[int, int]:
     """Parsea una hora en múltiples formatos y devuelve (hora_24h, minuto)."""
