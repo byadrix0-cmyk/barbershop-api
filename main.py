@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from unidecode import unidecode
 import os
 import json
 import dateparser
@@ -52,6 +53,12 @@ def _validar_fecha_no_pasada(dt: datetime):
     now = datetime.now(TZ_CANARIAS)
     if dt.date() < now.date():
         raise ValueError(f"Esa fecha ya ha pasado. Hoy es {DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month]}.")
+
+def normalize(s: str) -> str:
+ """Normaliza un string: quita tildes, pasa a minúsculas, quita espacios."""
+ if not s:
+ return ""
+ return unidecode(s).lower().strip()
 
 def _validar_dia_laborable(dt: datetime):
     """Rechaza días en los que la peluquería está cerrada."""
@@ -243,12 +250,12 @@ def buscar_eventos_dia(service, fecha_str: str) -> list:
     ).execute().get('items', [])
 
 def filtrar_eventos_cliente(events: list, nombre: str) -> list:
-    """Filtra eventos que pertenecen al cliente por nombre."""
-    nombre_lower = nombre.lower().strip()
-    return [
-        e for e in events
-        if nombre_lower in e.get('summary', '').split('|')[0].lower()
-    ]
+ """Filtra eventos que pertenecen al cliente por nombre (sin distinguir tildes ni mayúsculas)."""
+ nombre_normalizado = normalize(nombre)
+ return [
+ e for e in events
+ if nombre_normalizado in normalize(e.get('summary', '').split('|')[0])
+ ]
 
 def color_barbero(nombre_barbero: str) -> str:
     """Devuelve el colorId de Google Calendar según barbero."""
