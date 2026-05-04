@@ -273,7 +273,6 @@ def filtrar_eventos_cliente(events: list, nombre: str, hora: str = None) -> list
         resultados.append(e)
 
     return resultados
-    ]
 
 def color_barbero(nombre_barbero: str) -> str:
     """Devuelve el colorId de Google Calendar según barbero."""
