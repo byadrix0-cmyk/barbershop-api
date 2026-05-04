@@ -249,12 +249,30 @@ def buscar_eventos_dia(service, fecha_str: str) -> list:
         singleEvents=True
     ).execute().get('items', [])
 
-def filtrar_eventos_cliente(events: list, nombre: str) -> list:
-    """Filtra eventos que pertenecen al cliente por nombre (sin distinguir tildes ni mayúsculas)."""
+def filtrar_eventos_cliente(events: list, nombre: str, hora: str = None) -> list:
+    """Filtra eventos por nombre, y opcionalmente por hora para mayor precisión."""
     nombre_normalizado = normalize(nombre)
-    return [
-        e for e in events
-        if nombre_normalizado in normalize(e.get('summary', '').split('|')[0])
+
+    resultados = []
+    for e in events:
+        parte_nombre = e.get('summary', '').split('|')[0].replace('✂️', '').strip()
+        if nombre_normalizado not in normalize(parte_nombre):
+            continue
+
+        if hora:
+            event_start = e.get('start', {}).get('dateTime', '')
+            if 'T' in event_start:
+                event_hora = event_start.split('T')[1][:5]
+                try:
+                    hora_buscada, minuto_buscado = parsear_hora(hora)
+                    if event_hora != f"{hora_buscada:02d}:{minuto_buscado:02d}":
+                        continue
+                except ValueError:
+                    pass
+
+        resultados.append(e)
+
+    return resultados
     ]
 
 def color_barbero(nombre_barbero: str) -> str:
@@ -291,7 +309,7 @@ class ModifyAppointmentRequest(BaseModel):
 class CancelAppointmentRequest(BaseModel):
     name: str
     date: str
-
+    time: Optional[str] = None
 
 # --- ENDPOINTS ---
 
@@ -476,7 +494,7 @@ def cancel_appointment(req: CancelAppointmentRequest):
         service = get_calendar_service()
 
         events = buscar_eventos_dia(service, fecha_exacta)
-        eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
+        eventos_del_cliente = filtrar_eventos_cliente(events, req.name, req.time)
 
         if not eventos_del_cliente:
             return {
