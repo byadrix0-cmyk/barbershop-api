@@ -501,18 +501,33 @@ def cancel_appointment(req: CancelAppointmentRequest):
                 "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
             }
 
-        for evento in eventos_del_cliente:
-            service.events().delete(
-                calendarId=get_calendar_id(),
-                eventId=evento['id']
-            ).execute()
+      eventos_del_cliente = filtrar_eventos_cliente(events, req.name, req.time)
 
-        if len(eventos_del_cliente) > 1:
-            return {
-                "status": "success",
-                "message": f"Dile al cliente: 'Tenías {len(eventos_del_cliente)} citas el {dia_legible}. Las he cancelado todas.'"
-            }
+if not eventos_del_cliente:
+    return {
+        "status": "error",
+        "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
+    }
 
+# Si hay varias citas y NO se especificó hora, pedir aclaración
+if len(eventos_del_cliente) > 1 and not req.time:
+    horas = []
+    for e in eventos_del_cliente:
+        start = e.get('start', {}).get('dateTime', '')
+        if 'T' in start:
+            horas.append(start.split('T')[1][:5])
+    horas_texto = " y otra a las ".join(horas)
+    return {
+        "status": "error",
+        "message": f"Dile al cliente: 'Veo que tienes {len(eventos_del_cliente)} citas el {dia_legible}: una a las {horas_texto}. ¿Cuál quieres cancelar?'"
+    }
+
+# Solo una cita, o se especificó hora → cancelar
+for evento in eventos_del_cliente:
+    service.events().delete(
+        calendarId=get_calendar_id(),
+        eventId=evento['id']
+    ).execute()
         return {
             "status": "success",
             "message": f"Dile al cliente: 'Listo, tu cita del {dia_legible} ha sido cancelada correctamente.'"
