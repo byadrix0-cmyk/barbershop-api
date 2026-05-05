@@ -48,17 +48,42 @@ TRANSLATIONS = {
 
 # --- FUNCIONES DE APOYO ---
 
+def normalize(s: str) -> str:
+    """Normaliza un string: quita tildes, pasa a minúsculas, quita espacios."""
+    if not s:
+        return ""
+    return unidecode(s).lower().strip()
+
+
+def hora_natural(hora: int, minuto: int) -> str:
+    """Convierte hora 24h a formato natural hablado en español."""
+    if hora == 0:
+        base = "12"
+        periodo = "de la noche"
+    elif hora < 12:
+        base = str(hora)
+        periodo = "de la mañana"
+    elif hora == 12:
+        base = "12"
+        periodo = "del mediodía"
+    else:
+        base = str(hora - 12)
+        periodo = "de la tarde"
+
+    if minuto == 0:
+        return f"{base} {periodo}"
+    elif minuto == 30:
+        return f"{base} y media {periodo}"
+    else:
+        return f"{base}:{minuto:02d} {periodo}"
+
+
 def _validar_fecha_no_pasada(dt: datetime):
     """Rechaza fechas anteriores a hoy."""
     now = datetime.now(TZ_CANARIAS)
     if dt.date() < now.date():
         raise ValueError(f"Esa fecha ya ha pasado. Hoy es {DAYS_ES[now.weekday()]} {now.day} de {MONTHS_ES[now.month]}.")
 
-def normalize(s: str) -> str:
-    """Normaliza un string: quita tildes, pasa a minúsculas, quita espacios."""
-    if not s:
-        return ""
-    return unidecode(s).lower().strip()
 
 def _validar_dia_laborable(dt: datetime):
     """Rechaza días en los que la peluquería está cerrada."""
@@ -206,6 +231,7 @@ def parsear_hora(time_str: str) -> tuple[int, int]:
         raise ValueError("Esa hora no es válida.")
     return hora, minuto
 
+
 def get_time_bounds(date_str: str, time_str: str) -> tuple[str, str]:
     """Calcula inicio y fin del slot (30 min) con validación de horario comercial."""
     hora, minuto = parsear_hora(time_str)
@@ -216,6 +242,7 @@ def get_time_bounds(date_str: str, time_str: str) -> tuple[str, str]:
     end_dt = start_dt + timedelta(minutes=30)
     return start_dt.isoformat(), end_dt.isoformat()
 
+
 def get_calendar_service():
     """Conecta con Google Calendar usando credenciales de servicio."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
@@ -225,6 +252,7 @@ def get_calendar_service():
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return build('calendar', 'v3', credentials=creds)
 
+
 def get_calendar_id():
     """Obtiene el ID del calendario desde variables de entorno."""
     cal_id = os.environ.get("CALENDAR_ID")
@@ -232,11 +260,13 @@ def get_calendar_id():
         raise HTTPException(status_code=500, detail="CALENDAR_ID no configurado")
     return cal_id
 
+
 def sanitizar_barbero(barber: Optional[str]) -> str:
     """Normaliza el campo barbero."""
     if not barber or str(barber).lower().strip() in ("null", "none", "", "sin preferencia"):
         return "Sin preferencia"
     return barber.strip().capitalize()
+
 
 def buscar_eventos_dia(service, fecha_str: str) -> list:
     """Busca todos los eventos de un día completo."""
@@ -248,6 +278,7 @@ def buscar_eventos_dia(service, fecha_str: str) -> list:
         timeMax=end_search,
         singleEvents=True
     ).execute().get('items', [])
+
 
 def filtrar_eventos_cliente(events: list, nombre: str, hora: str = None) -> list:
     """Filtra eventos por nombre, y opcionalmente por hora para mayor precisión."""
@@ -273,6 +304,7 @@ def filtrar_eventos_cliente(events: list, nombre: str, hora: str = None) -> list
         resultados.append(e)
 
     return resultados
+
 
 def color_barbero(nombre_barbero: str) -> str:
     """Devuelve el colorId de Google Calendar según barbero."""
@@ -310,6 +342,7 @@ class CancelAppointmentRequest(BaseModel):
     date: str
     time: Optional[str] = None
 
+
 # --- ENDPOINTS ---
 
 @app.get("/")
@@ -333,7 +366,7 @@ def check_availability(req: CheckAvailabilityRequest):
         ).execute().get('items', [])
 
         hora, minuto = parsear_hora(req.time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
+        hora_legible = hora_natural(hora, minuto)
 
         if len(events) >= MAX_CITAS_SIMULTANEAS:
             return {
@@ -355,7 +388,7 @@ def check_availability(req: CheckAvailabilityRequest):
         return {
             "status": "success",
             "available": True,
-            "message": f"Dile al cliente: 'Perfecto, sí tengo disponibilidad el {dia_legible} a las {hora_legible}. ¿Me indicas tu nombre completo?'"
+            "message": f"Dile al cliente: 'Perfecto, sí tengo disponibilidad el {dia_legible} a las {hora_legible}.'"
         }
 
     except ValueError as e:
@@ -371,7 +404,7 @@ def book_appointment(req: BookAppointmentRequest):
         fecha_exacta, dia_legible = resolver_fecha_inteligente(req.date)
         start_time, end_time = get_time_bounds(fecha_exacta, req.time)
         hora, minuto = parsear_hora(req.time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
+        hora_legible = hora_natural(hora, minuto)
 
         service = get_calendar_service()
         events = service.events().list(
@@ -425,7 +458,7 @@ def modify_appointment(req: ModifyAppointmentRequest):
         new_fecha_exacta, new_dia_legible = resolver_fecha_inteligente(req.new_date)
         new_start, new_end = get_time_bounds(new_fecha_exacta, req.new_time)
         hora, minuto = parsear_hora(req.new_time)
-        hora_legible = f"{hora:02d}:{minuto:02d}"
+        hora_legible = hora_natural(hora, minuto)
 
         service = get_calendar_service()
 
@@ -501,33 +534,32 @@ def cancel_appointment(req: CancelAppointmentRequest):
                 "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
             }
 
-      eventos_del_cliente = filtrar_eventos_cliente(events, req.name, req.time)
+        # Si hay varias citas y NO se especificó hora, pedir aclaración
+        if len(eventos_del_cliente) > 1 and not req.time:
+            horas = []
+            for e in eventos_del_cliente:
+                start = e.get('start', {}).get('dateTime', '')
+                if 'T' in start:
+                    h_str = start.split('T')[1][:5]
+                    try:
+                        h_int = int(h_str.split(':')[0])
+                        m_int = int(h_str.split(':')[1])
+                        horas.append(hora_natural(h_int, m_int))
+                    except ValueError:
+                        horas.append(h_str)
+            horas_texto = " y otra a las ".join(horas)
+            return {
+                "status": "error",
+                "message": f"Dile al cliente: 'Veo que tienes {len(eventos_del_cliente)} citas el {dia_legible}: una a las {horas_texto}. ¿Cuál quieres cancelar?'"
+            }
 
-if not eventos_del_cliente:
-    return {
-        "status": "error",
-        "message": f"Dile al cliente: 'No encuentro ninguna cita a tu nombre para cancelar el {dia_legible}.'"
-    }
+        # Solo una cita, o se especificó hora → cancelar
+        for evento in eventos_del_cliente:
+            service.events().delete(
+                calendarId=get_calendar_id(),
+                eventId=evento['id']
+            ).execute()
 
-# Si hay varias citas y NO se especificó hora, pedir aclaración
-if len(eventos_del_cliente) > 1 and not req.time:
-    horas = []
-    for e in eventos_del_cliente:
-        start = e.get('start', {}).get('dateTime', '')
-        if 'T' in start:
-            horas.append(start.split('T')[1][:5])
-    horas_texto = " y otra a las ".join(horas)
-    return {
-        "status": "error",
-        "message": f"Dile al cliente: 'Veo que tienes {len(eventos_del_cliente)} citas el {dia_legible}: una a las {horas_texto}. ¿Cuál quieres cancelar?'"
-    }
-
-# Solo una cita, o se especificó hora → cancelar
-for evento in eventos_del_cliente:
-    service.events().delete(
-        calendarId=get_calendar_id(),
-        eventId=evento['id']
-    ).execute()
         return {
             "status": "success",
             "message": f"Dile al cliente: 'Listo, tu cita del {dia_legible} ha sido cancelada correctamente.'"
