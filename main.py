@@ -460,10 +460,18 @@ def modify_appointment(req: ModifyAppointmentRequest):
         hora, minuto = parsear_hora(req.new_time)
         hora_legible = hora_natural(hora, minuto)
 
-        service = get_calendar_service()
+        print(f"[MODIFY] Recibido: name='{req.name}', current_date='{req.current_date}', new_date='{req.new_date}', new_time='{req.new_time}'")
+        print(f"[MODIFY] Fecha actual resuelta: {curr_fecha_exacta}")
+        print(f"[MODIFY] Fecha nueva resuelta: {new_fecha_exacta}")
 
+        service = get_calendar_service()
         events = buscar_eventos_dia(service, curr_fecha_exacta)
+         print(f"[MODIFY] Eventos encontrados el {curr_fecha_exacta}: {len(events)}")
+        for e in events:
+            print(f"[MODIFY]   Evento: '{e.get('summary')}' | start: {e.get('start', {}).get('dateTime', '')}")
+        
         eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
+         print(f"[MODIFY] Eventos del cliente '{req.name}': {len(eventos_del_cliente)}")
 
         if not eventos_del_cliente:
             return {
