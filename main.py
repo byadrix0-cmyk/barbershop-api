@@ -453,7 +453,7 @@ def book_appointment(req: BookAppointmentRequest):
 @app.post("/modify_appointment")
 def modify_appointment(req: ModifyAppointmentRequest):
     try:
-       barbero = sanitizar_barbero(req.barber)
+        barbero = sanitizar_barbero(req.barber)
         curr_fecha_exacta, _ = resolver_fecha_inteligente(req.current_date)
         new_fecha_exacta, new_dia_legible = resolver_fecha_inteligente(req.new_date)
         new_start, new_end = get_time_bounds(new_fecha_exacta, req.new_time)
