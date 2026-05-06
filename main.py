@@ -453,7 +453,7 @@ def book_appointment(req: BookAppointmentRequest):
 @app.post("/modify_appointment")
 def modify_appointment(req: ModifyAppointmentRequest):
     try:
-        barbero = sanitizar_barbero(req.barber)
+       barbero = sanitizar_barbero(req.barber)
         curr_fecha_exacta, _ = resolver_fecha_inteligente(req.current_date)
         new_fecha_exacta, new_dia_legible = resolver_fecha_inteligente(req.new_date)
         new_start, new_end = get_time_bounds(new_fecha_exacta, req.new_time)
@@ -465,14 +465,14 @@ def modify_appointment(req: ModifyAppointmentRequest):
         print(f"[MODIFY] Fecha nueva resuelta: {new_fecha_exacta}")
 
         service = get_calendar_service()
+
         events = buscar_eventos_dia(service, curr_fecha_exacta)
-         print(f"[MODIFY] Eventos encontrados el {curr_fecha_exacta}: {len(events)}")
+        print(f"[MODIFY] Eventos encontrados el {curr_fecha_exacta}: {len(events)}")
         for e in events:
             print(f"[MODIFY]   Evento: '{e.get('summary')}' | start: {e.get('start', {}).get('dateTime', '')}")
-        
-        eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
-         print(f"[MODIFY] Eventos del cliente '{req.name}': {len(eventos_del_cliente)}")
 
+        eventos_del_cliente = filtrar_eventos_cliente(events, req.name)
+        print(f"[MODIFY] Eventos del cliente '{req.name}': {len(eventos_del_cliente)}")
         if not eventos_del_cliente:
             return {
                 "status": "error",
